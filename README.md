@@ -2,7 +2,7 @@
 
 Interactief Streamlit-dashboard voor Minor Data Science. Alle appcode staat in **Dashboard_week_4.py**.
 
-**[Open het dashboard](https://hugo-case2-netflix-prime.streamlit.app/)** ·
+**[Open het dashboard](https://team-5-case-2-netflix-vs-prime.streamlit.app/)** ·
 [GitHub-repository](https://github.com/Hugohilbelink/Minor_data_science_case_2_movies_shows)
 
 ## Onderzoeksvraag
