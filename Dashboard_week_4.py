@@ -376,8 +376,8 @@ def main():
                     "[pandas merge](https://pandas.pydata.org/docs/reference/api/pandas.DataFrame.merge.html) · "
                     "[Plotly Express](https://plotly.com/python/plotly-express/) · "
                     "[TVmaze API](https://www.tvmaze.com/api)")
-        st.caption("Code opgesteld met hulp van Codex en aangepast voor deze datasets. De groep moet de "
-                   "filters, percentages, joins, opschoning en beperkingen zelf kunnen uitleggen.")
+        st.caption()
+        
 
 
 if __name__ == "__main__":
