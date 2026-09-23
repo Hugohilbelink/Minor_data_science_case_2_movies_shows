@@ -302,7 +302,7 @@ def main():
             st.write("**Mediaan releasejaar:** " + " · ".join(f"{p}: {y:g}" for p, y in medianen.items()) + ".")
             st.caption("Dit is de verdeling naar releasejaar van aanwezige titels, geen groei van de catalogus. "
                        "Bij series kan het bronjaar naar een later seizoen verwijzen.")
-            st.subheader("Conclusie voor jouw selectie")
+            st.subheader("Conclusie voor onze selectie")
             if aantallen.nunique() == 1:
                 st.write("Beide platforms hebben evenveel titels binnen deze selectie.")
             else:
