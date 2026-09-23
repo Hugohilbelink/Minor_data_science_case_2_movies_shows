@@ -9,6 +9,7 @@ Interactief Streamlit-dashboard voor Minor Data Science. Alle appcode staat in *
 
 Welk platform past bij jouw kijkvoorkeur, gezien de omvang en samenstelling van de catalogus?
 We vergelijken films en series, releasejaren, vergelijkbare genregroepen, speelduur en gedeelde titels.
+Daarnaast vergelijken we oorspronkelijke leeftijdsclassificaties en verkennen we hoofdtalen van gekoppelde series.
 De aanpak sluit aan op case 1: vraag → data inladen → datacheck → afgeleide variabelen → grafieken → conclusies.
 
 ## Lokaal starten
@@ -74,6 +75,44 @@ De CSV-analyse is reproduceerbaar met de vastgelegde bestanden; live API-scores 
   onderbouwen geen platformbrede kwaliteitsranglijst.
 
 ## Opdracht en presentatie
+
+### Leeftijdsclassificatie en talen
+
+Het tabblad **Leeftijdsclassificatie** toont ieder oorspronkelijk label naast het andere platform.
+De noemer is alle gefilterde catalogusvermeldingen per platform, inclusief ontbrekende waarden.
+Lege classificaties heten `Ontbreekt`; `NR`, `UR`, `UNRATED`, `TV-NR` en `NOT_RATE` blijven apart herkenbaar.
+De drie herstelde Netflix-speelduren tellen als ontbrekende classificatie (7 in totaal).
+Labels zoals `TV-MA`, `R` en `18+` worden niet gelijkgesteld of omgezet naar Kijkwijzer.
+Uitleg staat bij de grafiek met bronnen van [TV Parental Guidelines](https://www.tvguidelines.org/ratings.html)
+en [MPA Film Ratings](https://www.filmratings.com/ratings-guide/).
+
+Het tabblad **Talen** leest `tvmaze_talen.json`, een door het script opgehaalde API-momentopname.
+Een vaste willekeurige steekproef van 150 unieke serie-titel/type/jaarcombinaties per platform
+wordt vóór het matchen getrokken (`random_state=42`, stabiel gesorteerde invoer).
+Alleen één exacte genormaliseerde titel/jaar-match met bekende taal gaat de grafiek in.
+Geen match, meerdere matches, onbekende taal en API-fouten blijven in de dekkingscontrole staan.
+De filters beperken deze bestaande steekproef; ze trekken geen nieuwe steekproef.
+De percentagenoemer is uitsluitend het aantal gekoppelde steekproefseries met een bekende taal per platform.
+Een nulnoemer blijft onbeschikbaar. De app toont daarnaast de volledige seriepopulatie binnen de filters,
+steekproefomvang, bruikbare matches en matchdekking. Selectieve uitval kan taalverschillen vertekenen:
+de grafiek is geen representatieve vergelijking van de volledige catalogi.
+
+TVmaze `language` is de **belangrijkste gesproken taal**, niet het aanbod van ondertiteling of nasynchronisatie.
+De JSON bevat per aanvraag het ophaaltijdstip, bron-URL en koppelstatus, plus SHA-256-controles van de CSV's.
+Bij gewijzigde CSV's wordt de oude taalverdeling niet getoond. Deze data vallen onder TVmaze CC BY-SA;
+bron en licentie staan in de app en in de JSON. Het eerdere tabblad Titels & API blijft live aanvragen doen.
+
+De momentopname opnieuw ophalen (duurt enkele minuten, geen API-sleutel nodig):
+
+```bash
+python Dashboard_week_4.py --vernieuw-talen
+```
+
+Dit schrijft `tvmaze_talen.json` opnieuw met circa 1,5 aanvragen per seconde en retries bij HTTP 429.
+Commit het vernieuwde bestand om de nieuwe resultaten online te tonen. Het dashboard zelf hoeft
+bij openen geen honderden API-aanvragen te doen. Live API-resultaten kunnen na verloop van tijd veranderen.
+
+### Presentatievoorstel
 
 Gebaseerd op de aangeleverde pdf's `Case 2 - Streamlit dashboard` en `Hoe je case wordt beoordeeld`, onderdeel case 2.
 De onderwijs-pdf's worden niet meegestuurd naar de publieke repository.

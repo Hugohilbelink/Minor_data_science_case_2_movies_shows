@@ -40,6 +40,52 @@ class AnalyseTests(unittest.TestCase):
         tabel = dashboard.aantallen_per_categorie(alleen_netflix, 'soort', ['Film', 'Serie'])
         self.assertTrue(tabel.loc[tabel.platform.eq('Amazon Prime'), 'Percentage'].isna().all())
 
+    def test_leeftijdslabels_en_ontbrekende_waarden(self):
+        tabel = dashboard.aantallen_per_categorie(self.data, 'Classificatie')
+        self.assertTrue(tabel.groupby('platform').Aantal.sum().eq(self.data.groupby('platform').size()).all())
+        self.assertTrue(tabel.groupby('platform').Percentage.sum().round(8).eq(100).all())
+        netflix = self.data[self.data.platform.eq('Netflix')]
+        self.assertEqual(netflix.Classificatie.eq('Ontbreekt').sum(), 7)
+        self.assertFalse(self.data.Classificatie.str.contains(' min').any())
+        self.assertTrue({'NR', 'TV-MA', '18+', 'Ontbreekt'}.issubset(set(self.data.Classificatie)))
+
+    def test_taalsteekproef_is_herhaalbaar_en_uniek(self):
+        eerste = dashboard.kies_taalsteekproef(self.data)
+        tweede = dashboard.kies_taalsteekproef(self.data)
+        pd.testing.assert_frame_equal(eerste, tweede)
+        self.assertEqual(eerste.groupby('platform').size().to_dict(), {'Amazon Prime': 150, 'Netflix': 150})
+        self.assertFalse(eerste.duplicated(['platform'] + dashboard.SLEUTEL).any())
+        self.assertTrue(eerste.type.eq('TV Show').all())
+
+    def test_taalmatch_vereist_een_kandidaat_en_juist_jaar(self):
+        kandidaten = pd.DataFrame([{'titel_sleutel': 'test', 'release_year': 2020,
+                                    'Taal': 'English', 'TVmaze-id': 1, 'Bron': 'https://www.tvmaze.com/shows/1'}])
+        self.assertEqual(dashboard.beoordeel_taalmatch(kandidaten, 'test', 2020)['Taal'], 'English')
+        self.assertEqual(dashboard.beoordeel_taalmatch(kandidaten, 'test', 2019)['Koppelstatus'], 'Geen titel/jaarmatch')
+        self.assertEqual(dashboard.beoordeel_taalmatch(pd.concat([kandidaten, kandidaten]), 'test', 2020)['Koppelstatus'], 'Meerdere matches')
+        kandidaten['Taal'] = None
+        self.assertEqual(dashboard.beoordeel_taalmatch(kandidaten, 'test', 2020)['Koppelstatus'], 'Taal onbekend')
+
+    def test_taaldekking_en_noemers(self):
+        selectie = pd.DataFrame({'platform': ['Netflix'] * 3 + ['Amazon Prime'],
+                                 'titel_sleutel': ['a', 'b', 'c', 'd'], 'type': ['TV Show'] * 4,
+                                 'release_year': [2020] * 4})
+        api = pd.DataFrame({'platform': ['Netflix', 'Netflix', 'Amazon Prime'],
+                            'titel_sleutel': ['a', 'b', 'd'], 'release_year': [2020] * 3,
+                            'Koppelstatus': ['Gekoppeld', 'Geen titel/jaarmatch', 'API-fout'],
+                            'Taal': ['English', None, None]})
+        sample, bekend, dekking = dashboard.taaloverzicht(selectie, api)
+        self.assertEqual(dekking.loc['Netflix'].to_list(), [3, 2, 1, 1, 50])
+        self.assertEqual(len(sample), 3)
+        self.assertEqual(len(bekend), 1)
+        tabel = dashboard.aantallen_per_categorie(bekend, 'Taal')
+        self.assertEqual(tabel[tabel.platform.eq('Netflix')].Percentage.iloc[0], 100)
+        self.assertTrue(tabel[tabel.platform.eq('Amazon Prime')].Percentage.isna().all())
+        sample, bekend, dekking = dashboard.taaloverzicht(selectie.iloc[0:0], api)
+        self.assertTrue(sample.empty)
+        self.assertTrue(dekking['Matchdekking (%)'].isna().all())
+
+
 
 class AppTests(unittest.TestCase):
     def test_filters_en_api_storing(self):

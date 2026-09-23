@@ -6,6 +6,10 @@ API- en bibliotheekdocumentatie staan onderaan in de app en in README.md.
 
 from datetime import datetime, timezone
 from pathlib import Path
+import hashlib
+import json
+import sys
+import time
 import unicodedata
 
 import pandas as pd
@@ -67,6 +71,7 @@ def laad_data():
         herstel = df["duration"].isna() & df["rating"].str.fullmatch(r"\d+ min", na=False)
         df.loc[herstel, "duration"] = df.loc[herstel, "rating"]
         df.loc[herstel, "rating"] = pd.NA
+        df["Classificatie"] = df["rating"].fillna("Ontbreekt").str.strip().replace("", "Ontbreekt")
         minuten = pd.to_numeric(df["duration"].str.extract(r"^(\d+) min$")[0], errors="coerce")
         seizoenen = pd.to_numeric(df["duration"].str.extract(r"^(\d+) Seasons?$")[0], errors="coerce")
         df["minuten"] = minuten.where(df["type"].eq("Movie") & minuten.gt(0))
@@ -110,6 +115,7 @@ def aantallen_per_categorie(data, kolom, categorieen=None):
     return tabel
 
 
+
 @st.cache_data(ttl=86400, show_spinner=False)
 def haal_tvmaze(titel):
     """Openbare API zonder sleutel. Alleen succesvolle antwoorden worden gecachet."""
@@ -129,10 +135,84 @@ def haal_tvmaze(titel):
     return pd.DataFrame(rijen, columns=kolommen), datetime.now(timezone.utc).isoformat(timespec="seconds"), response.url
 
 
-def toon_grafiek(fig):
+def kies_taalsteekproef(data, aantal=150):
+    """Vaste willekeurige steekproef, getrokken vóór we weten welke titels matchen."""
+    series = data[data.type.eq("TV Show")].sort_values(["platform"] + SLEUTEL).drop_duplicates(["platform"] + SLEUTEL)
+    return pd.concat([series[series.platform.eq(p)].sample(
+        n=min(aantal, len(series[series.platform.eq(p)])), random_state=42
+    ) for p in PLATFORMS], ignore_index=True)
+
+
+def beoordeel_taalmatch(kandidaten, titel_sleutel, jaar):
+    match = kandidaten[kandidaten.titel_sleutel.eq(titel_sleutel) & kandidaten.release_year.eq(jaar)]
+    if len(match) != 1:
+        return {"Koppelstatus": "Geen titel/jaarmatch" if match.empty else "Meerdere matches", "Taal": None}
+    rij = match.iloc[0]
+    return {"Koppelstatus": "Gekoppeld" if pd.notna(rij.Taal) and str(rij.Taal).strip() else "Taal onbekend",
+            "Taal": rij.Taal if pd.notna(rij.Taal) else None,
+            "TVmaze-id": int(rij["TVmaze-id"]), "Bron": rij.Bron}
+
+
+def vernieuw_talen():
+    """Reproduceer de API-momentopname: python Dashboard_week_4.py --vernieuw-talen."""
+    data, _, _ = laad_data()
+    steekproef = kies_taalsteekproef(data)
+    resultaten = []
+    antwoorden = {}
+    for nummer, rij in enumerate(steekproef.itertuples(index=False), 1):
+        resultaat = {"platform": rij.platform, "show_id": rij.show_id, "title": rij.title,
+                     "titel_sleutel": rij.titel_sleutel, "release_year": int(rij.release_year)}
+        try:
+            if rij.titel_sleutel not in antwoorden:
+                # Maximaal circa 1,5 aanvragen per seconde; bij 429 wachten en opnieuw proberen.
+                for poging in range(3):
+                    try:
+                        antwoorden[rij.titel_sleutel] = haal_tvmaze(rij.title)
+                        break
+                    except requests.HTTPError as exc:
+                        if exc.response.status_code != 429 or poging == 2:
+                            raise
+                        time.sleep(10)
+                time.sleep(0.7)
+            kandidaten, tijdstip, url = antwoorden[rij.titel_sleutel]
+            resultaat.update(beoordeel_taalmatch(kandidaten, rij.titel_sleutel, rij.release_year))
+            resultaat.update({"Opgehaald UTC": tijdstip, "API-verzoek": url})
+        except (requests.RequestException, ValueError, KeyError, TypeError) as exc:
+            resultaat.update({"Koppelstatus": "API-fout", "Taal": None, "Fouttype": type(exc).__name__})
+        resultaten.append(resultaat)
+        if nummer % 25 == 0:
+            print(f"TVmaze: {nummer}/{len(steekproef)} series verwerkt", flush=True)
+    inhoud = {"gemaakt_utc": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+              "aantal_per_platform": 150, "random_state": 42,
+              "methode": "Willekeurige unieke titel/type/jaar-sleutels per platform; exacte titel/jaarmatch met één kandidaat",
+              "bron": "https://www.tvmaze.com/api", "licentie": "CC BY-SA",
+              "csv_sha256": {p: hashlib.sha256((MAP / f).read_bytes()).hexdigest() for p, f in BESTANDEN.items()},
+              "resultaten": resultaten}
+    pad = MAP / "tvmaze_talen.json"
+    tijdelijk = pad.with_suffix(".json.tmp")
+    tijdelijk.write_text(json.dumps(inhoud, ensure_ascii=False, indent=2), encoding="utf-8")
+    tijdelijk.replace(pad)
+    print(pd.DataFrame(resultaten).groupby(["platform", "Koppelstatus"]).size().to_string(), flush=True)
+
+
+def taaloverzicht(selectie, api_data):
+    """Bewaar ook mislukte koppelingen in de noemer van de dekkingscontrole."""
+    series = selectie[selectie.type.eq("TV Show")].drop_duplicates(["platform"] + SLEUTEL)
+    sample = series[["platform", "titel_sleutel", "release_year"]].merge(
+        api_data, on=["platform", "titel_sleutel", "release_year"], how="inner", validate="one_to_one")
+    gekoppeld = sample[sample.Koppelstatus.eq("Gekoppeld") & sample.Taal.notna()].copy()
+    telling = lambda frame: frame.groupby("platform").size().reindex(PLATFORMS, fill_value=0)
+    dekking = pd.DataFrame({"Series in selectie": telling(series), "In steekproef": telling(sample),
+                           "Met bekende taal": telling(gekoppeld)})
+    dekking["Zonder bruikbare taal"] = dekking["In steekproef"] - dekking["Met bekende taal"]
+    dekking["Matchdekking (%)"] = 100 * dekking["Met bekende taal"] / dekking["In steekproef"].replace(0, float("nan"))
+    return sample, gekoppeld, dekking
+
+
+def toon_grafiek(fig, hoogte=390):
     fig.update_layout(template="plotly_white", font=dict(size=14),
                       margin=dict(l=10, r=20, t=25, b=15), legend_title_text="",
-                      legend=dict(orientation="h", y=1.12), height=390)
+                      legend=dict(orientation="h", y=1.12), height=hoogte)
     st.plotly_chart(fig, width="stretch", config={"displayModeBar": False})
 
 
@@ -150,7 +230,8 @@ def main():
     st.caption("MINOR DATA SCIENCE · CASE 2 · CATALOGUSVERGELIJKING")
     st.title("Netflix versus Amazon Prime")
     st.write("**Welk platform past bij jouw kijkvoorkeur?** Vergelijk de omvang en samenstelling "
-             "van het aanbod: films, series, genres, releasejaren en speelduur.")
+             "van het aanbod: films, series, genres, releasejaren, speelduur en leeftijdsclassificaties. "
+             "Verken ook de hoofdtaal van series uit een TVmaze-steekproef.")
     st.caption("Historische CSV-momentopnamen met releasejaren tot 2021. Dit dashboard toont geen actueel "
                "Nederlands aanbod, kijkcijfers of kwaliteitsoordeel. De precieze peildatum is niet in de CSV's vastgelegd.")
 
@@ -169,7 +250,8 @@ def main():
                           (int(data.release_year.min()), int(data.release_year.max())))
         genre = st.selectbox("Genre", ["Alle genres"] + list(GENRES))
         percentage = st.checkbox("Vergelijk in percentages", value=True,
-                                 help="De noemer is steeds het aantal gefilterde titels binnen hetzelfde platform.")
+                                 help="Meestal alle gefilterde vermeldingen per platform. Bij Talen gebruiken we alleen "
+                                      "gekoppelde steekproefseries met een bekende taal; de noemer staat bij de grafiek.")
         st.caption("Rood = Netflix · Blauw = Amazon Prime. Filters gelden voor de grafieken, conclusies en titeltabel. "
                    "De dataverantwoording gebruikt altijd de volledige bronbestanden.")
 
@@ -179,7 +261,9 @@ def main():
     if genre != "Alle genres":
         selectie = selectie[selectie.genres.map(lambda waarden: genre in waarden)]
     st.caption(f"SELECTIE: {soort} · {jaren[0]}–{jaren[1]} · {genre}")
-    overzicht, verdieping, titels, methode = st.tabs(["Overzicht", "Genres & speelduur", "Titels & API", "Data & methode"])
+    overzicht, verdieping, leeftijd, talen, titels, methode = st.tabs(
+        ["Overzicht", "Genres & speelduur", "Leeftijdsclassificatie", "Talen", "Titels & API", "Data & methode"]
+    )
     maat = "Percentage" if percentage else "Aantal"
     aslabel = "Aandeel van geselecteerde titels (%)" if percentage else "Aantal titels"
     aantallen = selectie.groupby("platform").size().reindex(PLATFORMS, fill_value=0)
@@ -272,6 +356,112 @@ def main():
                 st.caption(f"{len(geldig)} van {len(subset)} titels hebben een geldige duur. "
                            "De lijn in de box is de mediaan; de box bevat de middelste 50%. "
                            "Seizoenen zijn geen kijkuren en staan los van de minuten bij films.")
+
+    with leeftijd:
+        st.subheader("Voor welke leeftijden is het aanbod geclassificeerd?")
+        st.write("De kolom rating bevat leeftijdsclassificaties, geen kijkersscores. "
+                 "We vergelijken de oorspronkelijke bronlabels, inclusief ontbrekende waarden.")
+        st.info("De datasets mengen verschillende classificatiesystemen. Een label als TV-MA of R "
+                "wordt hier niet omgezet naar Nederlands 18+. Ook 13+ is niet hetzelfde als Kijkwijzer 12+.")
+        if selectie.empty:
+            st.info("Geen titels voor deze filters.")
+        else:
+            categorieen = sorted(selectie.Classificatie.unique(),
+                                 key=lambda label: (label == "Ontbreekt", label))
+            ratings = aantallen_per_categorie(selectie, "Classificatie", categorieen)
+            fig = px.bar(ratings, y="Classificatie", x=maat, color="platform", orientation="h", barmode="group",
+                         color_discrete_map=KLEUREN, category_orders={"Classificatie": categorieen},
+                         labels={maat: aslabel, "Classificatie": "Leeftijdslabel uit de bron"},
+                         hover_data={"Aantal": True, "Percentage": ":.1f"})
+            toon_grafiek(fig, hoogte=max(420, 31 * len(categorieen)))
+            st.caption("De noemer is alle gefilterde catalogusvermeldingen van hetzelfde platform, "
+                       "inclusief Ontbreekt en niet-beoordeelde titels. Een ontbrekende staaf bij nul "
+                       "betekent dat het label niet voorkomt in deze selectie.")
+            for platform in PLATFORMS:
+                subset = selectie[selectie.platform.eq(platform)]
+                if subset.empty:
+                    st.info(f"{platform}: geen titels in deze selectie; er is geen percentage beschikbaar.")
+                else:
+                    ontbreekt = int(subset.Classificatie.eq("Ontbreekt").sum())
+                    st.write(f"**{platform}:** {getal(len(subset))} vermeldingen; "
+                             f"{getal(ontbreekt)} hebben een ontbrekende classificatie ({100 * ontbreekt / len(subset):.1f}%).")
+            with st.expander("Bekijk aantallen en percentages per label"):
+                st.dataframe(ratings.round({"Percentage": 1}), hide_index=True, width="stretch")
+        st.markdown("**Hoe lees je de labels?**")
+        st.markdown("- **7+, 13+, 16+, 18+** zijn de leeftijdslabels zoals aangeleverd in de dataset. "
+                    "ALL en ALL_AGES betekenen alle leeftijden.\n"
+                    "- **TV-Y, TV-Y7, TV-G, TV-PG, TV-14, TV-MA** horen bij Amerikaanse tv-richtlijnen. "
+                    "TV-Y richt zich op kinderen; TV-Y7 op kinderen vanaf 7; TV-G op een algemeen publiek; "
+                    "TV-PG adviseert ouderlijke begeleiding; TV-14 waarschuwt voor ongeschiktheid onder 14; "
+                    "TV-MA is bedoeld voor volwassenen. TV-Y7-FV vermeldt daarnaast fantasiegeweld.\n"
+                    "- **G, PG, PG-13, R, NC-17** zijn Amerikaanse filmclassificaties. PG betekent ouderlijke "
+                    "begeleiding aangeraden; PG-13 een sterke waarschuwing onder 13; bij R is onder 17 "
+                    "begeleiding van een ouder of volwassen voogd nodig; NC-17 sluit 17 jaar en jonger uit.\n"
+                    "- **NR, UR, UNRATED, TV-NR en NOT_RATE** zijn bronlabels voor niet beoordeeld. "
+                    "Die blijven onderscheiden van een leeg veld (**Ontbreekt**).\n"
+                    "- Zeldzame bronvarianten zoals **16, AGES_16_ en AGES_18_** blijven apart zichtbaar; "
+                    "we doen geen onbewezen omzetting tussen systemen.")
+        st.markdown("Bronnen voor de Amerikaanse labels: [TV Parental Guidelines](https://www.tvguidelines.org/ratings.html) "
+                    "en [MPA Film Ratings](https://www.filmratings.com/ratings-guide/).")
+
+    with talen:
+        st.subheader("Welke hoofdtalen hebben de gekoppelde series?")
+        st.write("TVmaze is een database met informatie over series en afleveringen. Via de openbare API "
+                 "vragen we de belangrijkste gesproken taal van een serie op. Beschikbare ondertiteling "
+                 "en nasynchronisatie op Netflix of Amazon zijn hiermee niet vast te stellen.")
+        st.caption("Deze verkenning gebruikt een vaste willekeurige steekproef van maximaal 150 unieke "
+                   "series per platform, getrokken vóór het koppelen (random seed 42). De zijbalkfilters "
+                   "selecteren binnen die vaste steekproef; ze trekken geen nieuwe series.")
+        try:
+            momentopname = json.loads((MAP / "tvmaze_talen.json").read_text(encoding="utf-8"))
+            gewijzigd = any(hashlib.sha256((MAP / BESTANDEN[p]).read_bytes()).hexdigest() !=
+                            momentopname["csv_sha256"][p] for p in PLATFORMS)
+            if gewijzigd:
+                st.warning("De bronbestanden zijn veranderd sinds de taaldata zijn opgehaald. "
+                           "Vernieuw de API-momentopname voordat je deze taalvergelijking gebruikt.")
+            else:
+                sample, gekoppeld, taal_dekking = taaloverzicht(selectie, pd.DataFrame(momentopname["resultaten"]))
+                st.dataframe(taal_dekking.round(1), width="stretch")
+                st.warning("Alleen series met één exacte titel/jaarmatch én een bekende taal staan in de grafiek. "
+                           "Gemiste matches kunnen samenhangen met taal of een afwijkend seizoenjaar. "
+                           "Deze uitkomsten zijn daarom geen representatieve taalverdeling van het volledige aanbod.")
+                if sample.empty:
+                    st.info("Geen steekproefseries voor deze filters. Kies Films en series of Serie, "
+                            "of verruim het jaarbereik en genre.")
+                elif gekoppeld.empty:
+                    st.info("Voor deze steekproefselectie zijn geen bruikbare taalgegevens gevonden.")
+                else:
+                    taal_tabel = aantallen_per_categorie(gekoppeld, "Taal")
+                    volgorde = taal_tabel.groupby("Taal").Aantal.sum().sort_values(ascending=False).index.tolist()
+                    toon_grafiek(px.bar(taal_tabel, y="Taal", x=maat, color="platform", barmode="group",
+                                         orientation="h", color_discrete_map=KLEUREN,
+                                         category_orders={"Taal": volgorde},
+                                         labels={maat: "Aandeel van gekoppelde series met bekende taal (%)" if percentage
+                                                 else "Aantal gekoppelde series met bekende taal"},
+                                         hover_data={"Aantal": True, "Percentage": ":.1f"}),
+                                 hoogte=max(390, 32 * len(volgorde)))
+                    for platform in PLATFORMS:
+                        n = int(taal_dekking.loc[platform, "Met bekende taal"])
+                        st.caption(f"{platform}: de percentagenoemer is {n} gekoppelde series met bekende taal. "
+                                   + ("Geen taalverdeling beschikbaar." if n == 0 else
+                                      "Een kleine deelgroep: interpreteer verschillen voorzichtig." if n < 30 else ""))
+                if not sample.empty:
+                    with st.expander("Controleer de series en de gemiste koppelingen"):
+                        st.dataframe(sample.groupby(["platform", "Koppelstatus"]).size().rename("Aantal").reset_index(),
+                                     hide_index=True, width="stretch")
+                        st.dataframe(sample[["platform", "title", "release_year", "Koppelstatus", "Taal", "Bron"]],
+                                     hide_index=True, width="stretch")
+                        st.download_button("Download taalsteekproef", sample.to_csv(index=False).encode("utf-8-sig"),
+                                           "tvmaze_taalsteekproef.csv", "text/csv")
+                st.caption(f"API-momentopname opgeslagen op {momentopname['gemaakt_utc']} (UTC). "
+                           "De resultaten zijn vooraf opgehaald zodat de app snel opent. "
+                           "Per serie staat het werkelijke ophaaltijdstip in de download. "
+                           "Het tabblad Titels & API doet daarnaast live aanvragen met een cache van 24 uur.")
+        except (OSError, ValueError, KeyError, TypeError) as exc:
+            st.info(f"De opgeslagen taalgegevens zijn niet beschikbaar ({type(exc).__name__}). "
+                    "De andere analyses blijven werken.")
+        st.markdown("[TVmaze API en CC BY-SA](https://www.tvmaze.com/api) · "
+                    "[Definitie van het taalveld](https://www.tvmaze.com/faq/13/shows)")
 
     with titels:
         st.subheader("5. Welk aanbod delen de platforms?")
@@ -381,6 +571,8 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
-
+    if "--vernieuw-talen" in sys.argv:
+        vernieuw_talen()
+    else:
+        main()
 
