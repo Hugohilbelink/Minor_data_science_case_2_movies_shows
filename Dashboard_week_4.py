@@ -134,6 +134,50 @@ def aantallen_per_categorie(data, kolom, categorieen=None):
     return tabel
 
 
+def genreverschillen(data):
+    """Percentagepunten Netflix minus Amazon; onbekende noemers blijven onbekend."""
+    noemers = data.groupby("platform").size().reindex(PLATFORMS, fill_value=0)
+    records = []
+    for genre in GENRES:
+        aantallen = data.loc[data.genres.map(lambda labels: genre in labels).astype(bool)].groupby("platform").size()
+        percentages = {p: 100 * aantallen.get(p, 0) / noemers[p] if noemers[p] else float("nan")
+                       for p in PLATFORMS}
+        records.append({"Genre": genre, **percentages,
+                        "Verschil (procentpunt)": percentages["Netflix"] - percentages["Amazon Prime"]})
+    return pd.DataFrame(records)
+
+
+def toets_aanbodmix(data, genre):
+    """Standaardiseer beide platforms naar dezelfde gepoolde film/serie-verhouding.
+
+    Geen causaliteitstoets: hiermee onderzoeken we alleen de verklaring aanbodmix.
+    Elk stratum vereist waarnemingen van beide platforms; nooit ontbrekend als nul.
+    """
+    rows = []
+    for soort in ["Film", "Serie"]:
+        for platform in PLATFORMS:
+            deel = data[data.soort.eq(soort) & data.platform.eq(platform)]
+            aantal = int(deel.genres.map(lambda labels: genre in labels).sum())
+            rows.append({"Platform": platform, "Type": soort, "Titels": len(deel),
+                         "Titels in genre": aantal,
+                         "Aandeel (%)": 100 * aantal / len(deel) if len(deel) else float("nan")})
+    tabel = pd.DataFrame(rows)
+    gewichten = tabel.groupby("Type").Titels.sum()
+    gewichten = gewichten / gewichten.sum() if gewichten.sum() else gewichten * float("nan")
+    tabel["Gemeenschappelijk gewicht"] = tabel.Type.map(gewichten)
+    ruw = genreverschillen(data).set_index("Genre").loc[genre, "Verschil (procentpunt)"]
+    uitkomsten = [{"Vergelijking": "Oorspronkelijke mix", "Verschil (procentpunt)": ruw}]
+    for soort in ["Film", "Serie"]:
+        deel = tabel[tabel.Type.eq(soort)].set_index("Platform")["Aandeel (%)"]
+        uitkomsten.append({"Vergelijking": "Alleen films" if soort == "Film" else "Alleen series",
+                           "Verschil (procentpunt)": deel["Netflix"] - deel["Amazon Prime"]})
+    if tabel.Titels.gt(0).all():
+        gewogen = (tabel["Aandeel (%)"] * tabel["Gemeenschappelijk gewicht"]).groupby(tabel.Platform).sum()
+        uitkomsten.append({"Vergelijking": "Gelijke film/serie-mix",
+                           "Verschil (procentpunt)": gewogen["Netflix"] - gewogen["Amazon Prime"]})
+    return tabel, pd.DataFrame(uitkomsten), gewichten
+
+
 
 @st.cache_data(ttl=86400, show_spinner=False)
 def haal_tvmaze(titel):
@@ -229,6 +273,15 @@ def taaloverzicht(selectie, api_data):
 
 
 def toon_grafiek(fig, hoogte=390):
+    # Een tweede herkenningsmiddel naast kleur, ook bij afdrukken in grijstinten.
+    for trace in fig.data:
+        if trace.name in PLATFORMS:
+            if trace.type == "bar":
+                trace.marker.pattern.shape = "" if trace.name == "Netflix" else "/"
+            elif trace.type == "scatter":
+                trace.line.dash = "solid" if trace.name == "Netflix" else "dash"
+    fig.update_xaxes(automargin=True)
+    fig.update_yaxes(automargin=True)
     fig.update_layout(template="plotly_white", font=dict(size=14),
                       margin=dict(l=10, r=20, t=25, b=15), legend_title_text="",
                       legend=dict(orientation="h", y=1.12), height=hoogte)
@@ -244,6 +297,10 @@ def main():
     st.markdown("""<style>
     .block-container {max-width:1250px;padding-top:3.5rem;padding-bottom:3rem;}
     h1 {letter-spacing:-1.5px;} h2 {letter-spacing:-0.5px;}
+    @media (max-width: 640px) {
+        .block-container {padding-left:0.8rem;padding-right:0.8rem;padding-top:3rem;}
+        h1 {font-size:2rem;} [data-testid="stMetric"] {padding:10px;}
+    }
     [data-testid="stMetric"] {border:1px solid #dce3eb;border-radius:12px;padding:18px;}
     </style>""", unsafe_allow_html=True)
     st.caption("MINOR DATA SCIENCE · CASE 2 · CATALOGUSVERGELIJKING")
@@ -267,7 +324,12 @@ def main():
         soort = st.selectbox("Type aanbod", ["Films en series", "Film", "Serie"])
         jaren = st.slider("Releasejaar", int(data.release_year.min()), int(data.release_year.max()),
                           (int(data.release_year.min()), int(data.release_year.max())))
-        genre = st.selectbox("Genre", ["Alle genres"] + list(GENRES))
+        beschikbare_data = data[data.release_year.between(*jaren)]
+        if soort != "Films en series":
+            beschikbare_data = beschikbare_data[beschikbare_data.soort.eq(soort)]
+        beschikbare_genres = set(beschikbare_data.explode("genres").genres.dropna())
+        genre = st.selectbox("Genre", ["Alle genres"] + [g for g in GENRES if g in beschikbare_genres],
+                            help="De opties passen zich aan het gekozen type en jaarbereik aan.")
         percentage = st.checkbox("Vergelijk in percentages", value=True,
                                  help="Meestal alle gefilterde vermeldingen per platform. Bij Talen gebruiken we alleen "
                                       "gekoppelde steekproefseries met een bekende taal; de noemer staat bij de grafiek.")
@@ -280,8 +342,8 @@ def main():
     if genre != "Alle genres":
         selectie = selectie[selectie.genres.map(lambda waarden: genre in waarden)]
     st.caption(f"SELECTIE: {soort} · {jaren[0]}–{jaren[1]} · {genre}")
-    overzicht, verdieping, leeftijd, talen, titels, methode = st.tabs(
-        ["Overzicht", "Genres & speelduur", "Leeftijdsclassificatie", "Talen", "Titels & API", "Data & methode"]
+    overzicht, verdieping, verklaring, leeftijd, talen, titels, methode = st.tabs(
+        ["Overzicht", "Genres & speelduur", "Verschillen verklaren", "Leeftijdsclassificatie", "Talen", "Titels & API", "Data & methode"]
     )
     maat = "Percentage" if percentage else "Aantal"
     aslabel = "Aandeel van geselecteerde titels (%)" if percentage else "Aantal titels"
@@ -375,6 +437,79 @@ def main():
                 st.caption(f"{len(geldig)} van {len(subset)} titels hebben een geldige duur. "
                            "De lijn in de box is de mediaan; de box bevat de middelste 50%. "
                            "Seizoenen zijn geen kijkuren en staan los van de minuten bij films.")
+
+    with verklaring:
+        st.subheader("Komt het genreverschil door de verhouding films en series?")
+        st.write("Amazon heeft relatief meer films. Dat kan een genreverschil helpen verklaren. "
+                 "We vergelijken daarom eerst de aandelen, daarna films en series afzonderlijk, "
+                 "en tot slot beide platforms met dezelfde verhouding films en series.")
+        st.caption("Deze analyse gebruikt dezelfde selectie als de andere tabbladen. "
+                   "Een procentpunt is het verschil tussen twee percentages: 30% min 20% is 10 procentpunt.")
+        verschillen = genreverschillen(selectie)
+        geldig = verschillen.dropna(subset=["Verschil (procentpunt)"])
+        if geldig.empty:
+            st.info("Voor een platformvergelijking zijn titels van beide platforms nodig. Verruim de filters.")
+        else:
+            geldig = geldig.sort_values("Verschil (procentpunt)").copy()
+            geldig["Hoger aandeel"] = geldig["Verschil (procentpunt)"].map(
+                lambda x: "Netflix" if x >= 0 else "Amazon Prime")
+            fig = px.bar(geldig, y="Genre", x="Verschil (procentpunt)", color="Hoger aandeel",
+                         color_discrete_map=KLEUREN, orientation="h",
+                         category_orders={"Genre": geldig.Genre.tolist()},
+                         hover_data={"Netflix": ":.1f", "Amazon Prime": ":.1f", "Verschil (procentpunt)": ":.1f"})
+            fig.update_traces(texttemplate="%{x:+.1f}", textposition="outside", cliponaxis=False)
+            fig.add_vline(x=0, line_color="#333333", line_width=1)
+            opvallend = geldig.loc[geldig["Verschil (procentpunt)"].abs().idxmax()]
+            fig.add_annotation(x=float(opvallend["Verschil (procentpunt)"]), y=opvallend.Genre,
+                               text="Grootste verschil", showarrow=True, arrowhead=2,
+                               ax=0, ay=-34, bgcolor="white", bordercolor="#777777")
+            bereik = max(1, geldig["Verschil (procentpunt)"].abs().max()) * 1.45
+            fig.update_xaxes(range=[-bereik, bereik])
+            toon_grafiek(fig, hoogte=480)
+            st.caption("Links van nul: hoger aandeel bij Amazon. Rechts: hoger aandeel bij Netflix. "
+                       "De getallen zijn verschillen in procentpunten, ook als de zijbalk op aantallen staat. "
+                       "Arcering en positie maken de vergelijking ook zonder kleur leesbaar.")
+            gekozen_genre = st.selectbox("Genre om de verklaring te onderzoeken", list(GENRES),
+                                        index=list(GENRES).index("Thriller & spanning"))
+            st.caption("Standaard onderzoeken we Thriller & spanning. Je kunt ook de andere genres controleren.")
+            if genre != "Alle genres":
+                st.info("Je hebt al op een genre gefilterd. Dit resultaat geldt binnen die groep. "
+                        "Kies Alle genres in de zijbalk om de volledige catalogi te onderzoeken.")
+            strata, uitkomsten, gewichten = toets_aanbodmix(selectie, gekozen_genre)
+            st.dataframe(uitkomsten.round(2), hide_index=True, width="stretch")
+            if len(uitkomsten) < 4:
+                st.info("Voor dezelfde film/serie-mix hebben beide platforms films én series nodig. "
+                        "Kies Films en series en verruim eventueel de overige filters. "
+                        "Een ontbrekende groep wordt niet als nul behandeld.")
+            else:
+                st.write(f"**Dezelfde mix:** {gewichten['Film']:.1%} films en {gewichten['Serie']:.1%} series "
+                         "voor beide platforms. Deze gewichten volgen uit alle geselecteerde vermeldingen samen.")
+                ruw = float(uitkomsten.iloc[0]["Verschil (procentpunt)"])
+                gecorrigeerd = float(uitkomsten.iloc[-1]["Verschil (procentpunt)"])
+                if abs(ruw) < 0.05 and abs(gecorrigeerd) < 0.05:
+                    uitleg = "Zowel vóór als na de correctie is het verschil kleiner dan 0,05 procentpunt."
+                elif abs(ruw) < 0.05:
+                    uitleg = "Het oorspronkelijke verschil is vrijwel nul, maar na gelijkmaken van de mix ontstaat een verschil."
+                elif abs(gecorrigeerd) < 0.05:
+                    uitleg = "Na gelijkmaken van de mix is het verschil kleiner dan 0,05 procentpunt. De aanbodmix kan dit patroon vrijwel verklaren."
+                elif ruw * gecorrigeerd < 0:
+                    uitleg = "De richting draait om na gelijkmaken van de mix. De oorspronkelijke vergelijking is dus gevoelig voor de aanbodmix."
+                elif abs(gecorrigeerd) < abs(ruw):
+                    uitleg = "Het verschil wordt kleiner, maar blijft dezelfde kant op wijzen. De aanbodmix verklaart een deel van het patroon, niet alles."
+                else:
+                    uitleg = "Het verschil verdwijnt niet en wordt niet kleiner. Alleen de aanbodmix verklaart het patroon dus niet."
+                st.write(f"**Uitkomst voor {gekozen_genre}:** {ruw:+.2f} → {gecorrigeerd:+.2f} procentpunt "
+                         f"(Netflix min Amazon). {uitleg}")
+                st.caption("Beschrijvende controle, geen bewijs van oorzaak of statistische significantie. "
+                           "We corrigeren alleen voor films versus series; genrelabels, releasejaren en andere "
+                           "verschillen tussen bronnen kunnen nog meespelen. De grens 0,05 voorkomt conclusies "
+                           "over vrijwel nul bij de weergegeven afronding.")
+            with st.expander("Controleer aantallen en berekening"):
+                st.dataframe(strata.round(4), hide_index=True, width="stretch")
+                st.write("Per platform: aandeel films in dit genre × gemeenschappelijk filmgewicht + "
+                         "aandeel series in dit genre × gemeenschappelijk seriegewicht. "
+                         "Daarna trekken we het Amazon-aandeel af van het Netflix-aandeel. "
+                         "Alle catalogusvermeldingen van het betreffende type tellen mee in de noemer.")
 
     with leeftijd:
         st.subheader("Voor welke leeftijden is het aanbod geclassificeerd?")
@@ -518,27 +653,30 @@ def main():
             keuze = st.selectbox("Serie voor API-verrijking", series.index.tolist(), index=standaard[0] if standaard else 0,
                                 format_func=lambda i: f"{series.loc[i, 'title']} ({int(series.loc[i, 'release_year'])})")
             gekozen = series.loc[keuze]
-            try:
-                api, tijdstip, url = haal_tvmaze(gekozen.title)
-                match = api[api.titel_sleutel.eq(gekozen.titel_sleutel) & api.release_year.eq(gekozen.release_year)]
-                basis = selectie[selectie.titel_sleutel.eq(gekozen.titel_sleutel) & selectie.release_year.eq(gekozen.release_year) & selectie.soort.eq("Serie")]
-                if len(match) == 1:
-                    verrijkt = basis[["platform", "title", "titel_sleutel", "release_year"]].merge(
-                        match, on=["titel_sleutel", "release_year"], how="left", validate="many_to_one")
-                    st.dataframe(verrijkt[["platform", "title", "TVmaze-score", "Taal", "Status"]], hide_index=True, width="stretch")
-                    st.caption(f"Left join: {len(basis)} catalogusrij(en) + {len(match)} API-match → {len(verrijkt)} rij(en). "
-                               f"Opgehaald (UTC): {tijdstip}. Cache: 24 uur.")
-                    st.markdown(f"[Serie op TVmaze]({match.iloc[0]['Bron']})")
-                else:
-                    st.info(f"{len(match)} eenduidige titel/jaar-kandidaten: er is geen automatische koppeling uitgevoerd. "
-                            "De catalogusgegevens blijven behouden.")
-                    st.dataframe(api.drop(columns=["titel_sleutel"]).rename(columns={"release_year": "Premièrejaar"}), hide_index=True)
-                st.caption("TVmaze-scores en status zijn actuele aanvullende gegevens, geen representatieve vergelijking "
-                           "van platformkwaliteit. Een score ontbreekt als TVmaze geen score teruggeeft.")
-                st.markdown(f"[Gebruikt API-verzoek]({url}) · [TVmaze API / CC BY-SA](https://www.tvmaze.com/api)")
-            except (requests.RequestException, ValueError, KeyError, TypeError) as exc:
-                st.warning(f"TVmaze is momenteel niet beschikbaar ({type(exc).__name__}). "
-                           "Alle CSV-analyses blijven werken. Probeer de API later opnieuw.")
+            st.caption("De catalogus en taalsteekproef zijn al beschikbaar. Klik om actuele aanvullende "
+                       "gegevens voor deze serie op te vragen; succesvolle resultaten worden 24 uur bewaard.")
+            if st.button("Haal seriegegevens op bij TVmaze"):
+                try:
+                    api, tijdstip, url = haal_tvmaze(gekozen.title)
+                    match = api[api.titel_sleutel.eq(gekozen.titel_sleutel) & api.release_year.eq(gekozen.release_year)]
+                    basis = selectie[selectie.titel_sleutel.eq(gekozen.titel_sleutel) & selectie.release_year.eq(gekozen.release_year) & selectie.soort.eq("Serie")]
+                    if len(match) == 1:
+                        verrijkt = basis[["platform", "title", "titel_sleutel", "release_year"]].merge(
+                            match, on=["titel_sleutel", "release_year"], how="left", validate="many_to_one")
+                        st.dataframe(verrijkt[["platform", "title", "TVmaze-score", "Taal", "Status"]], hide_index=True, width="stretch")
+                        st.caption(f"Left join: {len(basis)} catalogusrij(en) + {len(match)} API-match → {len(verrijkt)} rij(en). "
+                                   f"Opgehaald (UTC): {tijdstip}. Cache: 24 uur.")
+                        st.markdown(f"[Serie op TVmaze]({match.iloc[0]['Bron']})")
+                    else:
+                        st.info(f"{len(match)} eenduidige titel/jaar-kandidaten: er is geen automatische koppeling uitgevoerd. "
+                                "De catalogusgegevens blijven behouden.")
+                        st.dataframe(api.drop(columns=["titel_sleutel"]).rename(columns={"release_year": "Premièrejaar"}), hide_index=True)
+                    st.caption("TVmaze-scores en status zijn actuele aanvullende gegevens, geen representatieve vergelijking "
+                               "van platformkwaliteit. Een score ontbreekt als TVmaze geen score teruggeeft.")
+                    st.markdown(f"[Gebruikt API-verzoek]({url}) · [TVmaze API / CC BY-SA](https://www.tvmaze.com/api)")
+                except (requests.RequestException, ValueError, KeyError, TypeError) as exc:
+                    st.warning(f"TVmaze is momenteel niet beschikbaar ({type(exc).__name__}). "
+                               "Alle CSV-analyses blijven werken. Probeer de API later opnieuw.")
 
     with methode:
         st.subheader("Onderzoeksvraag en werkwijze")
@@ -566,6 +704,15 @@ def main():
                  "die velden niet voor een platformranglijst of groeianalyse. We vullen ontbrekende waarden niet in met nul. "
                  "Nul minuten is geen geldige speelduur. De drie verkeerd geplaatste Netflix-speelduren worden hersteld. "
                  "Leeftijdsclassificaties zijn geen kijkersscores en verschillen in systeem per platform.")
+        st.write("Onze hoofdvariabelen zijn platform, type, genre, releasejaar en duur; leeftijdsgroepen en "
+                 "hoofdtalen verdiepen die vergelijking. Cast en regisseur beantwoorden deze vraag niet en "
+                 "worden niet aangevuld. Extreme maar mogelijke speelduurwaarden blijven zichtbaar in de "
+                 "boxplots. We verwijderen ze niet alleen omdat ze ongewoon zijn. De catalogus bevat na "
+                 "de controles nog steeds 18.475 vermeldingen; alleen de noemer van een specifieke "
+                 "duur- of taalanalyse kan kleiner zijn.")
+        st.caption("Samenvoegen onder elkaar heet concat. Een outer join zet overeenkomende titels naast "
+                   "elkaar en bewaart ook titels zonder match. Een left join voegt informatie toe terwijl "
+                   "de oorspronkelijke rijen behouden blijven. De noemer is het aantal waar je door deelt.")
         st.subheader("Samenvoegen zonder onbedoelde vermenigvuldiging")
         beide = int(koppeling._merge.eq("both").sum())
         st.write(f"Verticaal samenvoegen met `concat`: {len(raw['Netflix'])} + {len(raw['Amazon Prime'])} ruwe rijen "
@@ -593,6 +740,11 @@ def main():
         st.caption("De vaste taalsteekproef opnieuw ophalen kan met onderstaande opdracht. "
                    "Dit duurt enkele minuten; publiceer daarna het vernieuwde JSON-bestand mee.")
         st.code("python Dashboard_week_4.py --vernieuw-talen", language="bash")
+        st.write("Bij het vernieuwen van de taalsteekproef beperken we de aanvraagsnelheid. Bij HTTP 429 "
+                 "(te veel aanvragen) wachten we en proberen we maximaal drie keer. Een time-out begrenst "
+                 "de wachttijd; mislukte aanvragen krijgen een foutstatus. Dit zoekendpoint gebruikt geen "
+                 "paginering. De opgeslagen steekproef en cache houden de app bruikbaar bij API-problemen. "
+                 "Live gegevens worden pas opgevraagd na een klik.")
         st.subheader("Documentatie bij de code")
         st.markdown("[Streamlit](https://docs.streamlit.io/develop/api-reference) · "
                     "[pandas merge](https://pandas.pydata.org/docs/reference/api/pandas.DataFrame.merge.html) · "
