@@ -380,7 +380,7 @@ def main():
         st.subheader("Voor welke leeftijden is het aanbod geclassificeerd?")
         st.write("Vergelijkbare leeftijdsaanduidingen zijn samengevoegd tot 12 overzichtelijke groepen. "
                  "Rating betekent hier leeftijdsclassificatie, geen kijkersscore.")
-        st.caption("Dit is onze vereenvoudigde indeling, geen offici?le Kijkwijzer-omzetting. "
+        st.caption("Dit is onze vereenvoudigde indeling, geen officiële Kijkwijzer-omzetting. "
                    "Leeftijdsadviezen en toegangsregels kunnen per systeem verschillen. "
                    "R en TV-MA blijven daarom apart; ontbrekende waarden zijn geen beoordeling.")
         if selectie.empty:
