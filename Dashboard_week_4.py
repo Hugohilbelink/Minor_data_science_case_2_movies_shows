@@ -284,7 +284,7 @@ def toon_grafiek(fig, hoogte=390):
     fig.update_yaxes(automargin=True)
     fig.update_layout(template="plotly_white", font=dict(size=14),
                       margin=dict(l=10, r=20, t=25, b=15), legend_title_text="",
-                      legend=dict(orientation="h", y=1.12), height=hoogte)
+                      legend=dict(orientation="h", y=1.12, itemclick=False, itemdoubleclick=False), height=hoogte)
     st.plotly_chart(fig, width="stretch", config={"displayModeBar": False})
 
 
