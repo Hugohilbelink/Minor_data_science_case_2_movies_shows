@@ -1,7 +1,7 @@
 """Case 2: Netflix en Amazon Prime vergelijken. Start: streamlit run Dashboard_week_4.py.
 
 Opbouw zoals case 1: vraag, inladen, datacheck, afgeleide variabelen, EDA, conclusie.
-API- en bibliotheekdocumentatie staan onderaan in de app en in README.md.
+API- en bibliotheekdocumentatie staan onderaan in de app.
 """
 
 from datetime import datetime, timezone
@@ -40,6 +40,24 @@ GENRES = {
 }
 GENRE_MAP = {label: groep for groep, labels in GENRES.items() for label in labels}
 
+# Vergelijkbare leeftijdsaanduidingen; geen officiële omzetting naar Kijkwijzer.
+# De oorspronkelijke labels blijven behouden in Classificatie en rating.
+LEEFTIJDSGROEPEN = {
+    "Alle leeftijden": ["ALL", "ALL_AGES", "G", "TV-G"],
+    "Kinderen (TV-Y)": ["TV-Y"],
+    "Vanaf 7 jaar": ["7+", "TV-Y7", "TV-Y7-FV"],
+    "Ouderlijke begeleiding": ["PG", "TV-PG"],
+    "Vanaf 13 / advies 13": ["13+", "PG-13"],
+    "Advies vanaf 14 (TV-14)": ["TV-14"],
+    "Vanaf 16 jaar": ["16", "16+", "AGES_16_"],
+    "Onder 17 met begeleiding (R)": ["R"],
+    "Volwassen publiek (TV-MA)": ["TV-MA"],
+    "Vanaf 18 jaar": ["18+", "AGES_18_", "NC-17"],
+    "Niet beoordeeld": ["NR", "UR", "UNRATED", "TV-NR", "NOT_RATE"],
+    "Ontbreekt": ["Ontbreekt"],
+}
+LEEFTIJD_MAP = {label: groep for groep, labels in LEEFTIJDSGROEPEN.items() for label in labels}
+
 
 def normaliseer(titel):
     """Behoud leestekens en accenten, negeer alleen hoofdletters en extra spaties."""
@@ -72,6 +90,7 @@ def laad_data():
         df.loc[herstel, "duration"] = df.loc[herstel, "rating"]
         df.loc[herstel, "rating"] = pd.NA
         df["Classificatie"] = df["rating"].fillna("Ontbreekt").str.strip().replace("", "Ontbreekt")
+        df["Leeftijdsgroep"] = df["Classificatie"].map(LEEFTIJD_MAP).fillna("Overig bronlabel")
         minuten = pd.to_numeric(df["duration"].str.extract(r"^(\d+) min$")[0], errors="coerce")
         seizoenen = pd.to_numeric(df["duration"].str.extract(r"^(\d+) Seasons?$")[0], errors="coerce")
         df["minuten"] = minuten.where(df["type"].eq("Movie") & minuten.gt(0))
@@ -359,21 +378,22 @@ def main():
 
     with leeftijd:
         st.subheader("Voor welke leeftijden is het aanbod geclassificeerd?")
-        st.write("De kolom rating bevat leeftijdsclassificaties, geen kijkersscores. "
-                 "We vergelijken de oorspronkelijke bronlabels, inclusief ontbrekende waarden.")
-        st.info("De datasets mengen verschillende classificatiesystemen. Een label als TV-MA of R "
-                "wordt hier niet omgezet naar Nederlands 18+. Ook 13+ is niet hetzelfde als Kijkwijzer 12+.")
+        st.write("Vergelijkbare leeftijdsaanduidingen zijn samengevoegd tot 12 overzichtelijke groepen. "
+                 "Rating betekent hier leeftijdsclassificatie, geen kijkersscore.")
+        st.caption("Dit is onze vereenvoudigde indeling, geen offici?le Kijkwijzer-omzetting. "
+                   "Leeftijdsadviezen en toegangsregels kunnen per systeem verschillen. "
+                   "R en TV-MA blijven daarom apart; ontbrekende waarden zijn geen beoordeling.")
         if selectie.empty:
             st.info("Geen titels voor deze filters.")
         else:
-            categorieen = sorted(selectie.Classificatie.unique(),
-                                 key=lambda label: (label == "Ontbreekt", label))
-            ratings = aantallen_per_categorie(selectie, "Classificatie", categorieen)
-            fig = px.bar(ratings, y="Classificatie", x=maat, color="platform", orientation="h", barmode="group",
-                         color_discrete_map=KLEUREN, category_orders={"Classificatie": categorieen},
-                         labels={maat: aslabel, "Classificatie": "Leeftijdslabel uit de bron"},
+            categorieen = [g for g in [*LEEFTIJDSGROEPEN, "Overig bronlabel"]
+                            if g in selectie.Leeftijdsgroep.unique()]
+            ratings = aantallen_per_categorie(selectie, "Leeftijdsgroep", categorieen)
+            fig = px.bar(ratings, y="Leeftijdsgroep", x=maat, color="platform", orientation="h", barmode="group",
+                         color_discrete_map=KLEUREN, category_orders={"Leeftijdsgroep": categorieen},
+                         labels={maat: aslabel, "Leeftijdsgroep": "Samengevoegde leeftijdsgroep"},
                          hover_data={"Aantal": True, "Percentage": ":.1f"})
-            toon_grafiek(fig, hoogte=max(420, 31 * len(categorieen)))
+            toon_grafiek(fig, hoogte=max(460, 39 * len(categorieen)))
             st.caption("De noemer is alle gefilterde catalogusvermeldingen van hetzelfde platform, "
                        "inclusief Ontbreekt en niet-beoordeelde titels. Een ontbrekende staaf bij nul "
                        "betekent dat het label niet voorkomt in deze selectie.")
@@ -387,20 +407,23 @@ def main():
                              f"{getal(ontbreekt)} hebben een ontbrekende classificatie ({100 * ontbreekt / len(subset):.1f}%).")
             with st.expander("Bekijk aantallen en percentages per label"):
                 st.dataframe(ratings.round({"Percentage": 1}), hide_index=True, width="stretch")
-        st.markdown("**Hoe lees je de labels?**")
-        st.markdown("- **7+, 13+, 16+, 18+** zijn de leeftijdslabels zoals aangeleverd in de dataset. "
-                    "ALL en ALL_AGES betekenen alle leeftijden.\n"
-                    "- **TV-Y, TV-Y7, TV-G, TV-PG, TV-14, TV-MA** horen bij Amerikaanse tv-richtlijnen. "
-                    "TV-Y richt zich op kinderen; TV-Y7 op kinderen vanaf 7; TV-G op een algemeen publiek; "
-                    "TV-PG adviseert ouderlijke begeleiding; TV-14 waarschuwt voor ongeschiktheid onder 14; "
-                    "TV-MA is bedoeld voor volwassenen. TV-Y7-FV vermeldt daarnaast fantasiegeweld.\n"
-                    "- **G, PG, PG-13, R, NC-17** zijn Amerikaanse filmclassificaties. PG betekent ouderlijke "
-                    "begeleiding aangeraden; PG-13 een sterke waarschuwing onder 13; bij R is onder 17 "
-                    "begeleiding van een ouder of volwassen voogd nodig; NC-17 sluit 17 jaar en jonger uit.\n"
-                    "- **NR, UR, UNRATED, TV-NR en NOT_RATE** zijn bronlabels voor niet beoordeeld. "
-                    "Die blijven onderscheiden van een leeg veld (**Ontbreekt**).\n"
-                    "- Zeldzame bronvarianten zoals **16, AGES_16_ en AGES_18_** blijven apart zichtbaar; "
-                    "we doen geen onbewezen omzetting tussen systemen.")
+        with st.expander("Welke bronlabels zijn samengevoegd?"):
+            st.dataframe(pd.DataFrame([
+                {"Leeftijdsgroep": groep, "Oorspronkelijke labels": ", ".join(labels)}
+                for groep, labels in LEEFTIJDSGROEPEN.items()
+            ]), hide_index=True, width="stretch")
+            st.write("G, TV-G, ALL en ALL_AGES hebben de strekking alle leeftijden. TV-Y blijft apart: "
+                     "dat label richt zich specifiek op kinderen. TV-Y7-FV valt bij 7 jaar; FV beschrijft "
+                     "fantasiegeweld en verandert de leeftijdsaanduiding niet. PG en TV-PG adviseren begeleiding. "
+                     "PG-13 waarschuwt voor inhoud onder 13; samen met 13+ vormt het een globale 13-groep, "
+                     "zonder te beweren dat de toegangsregels identiek zijn.")
+            st.write("16, 16+ en AGES_16_ zijn schrijfvarianten van 16 jaar; 18+ en AGES_18_ van 18 jaar. "
+                     "NC-17 sluit 17 jaar en jonger uit en staat daarom bij 18 jaar. R laat jongeren onder 17 "
+                     "toe met een ouder of volwassen voogd. TV-MA richt zich op volwassenen en kan ongeschikt "
+                     "zijn onder 17. Die twee labels worden niet gelijkgesteld aan 18+. "
+                     "Niet beoordeeld en Ontbreekt blijven gescheiden. De originele labels blijven in de brondata staan.")
+            st.dataframe(aantallen_per_categorie(selectie, "Classificatie").round({"Percentage": 1}),
+                         hide_index=True, width="stretch")
         st.markdown("Bronnen voor de Amerikaanse labels: [TV Parental Guidelines](https://www.tvguidelines.org/ratings.html) "
                     "en [MPA Film Ratings](https://www.filmratings.com/ratings-guide/).")
 
@@ -561,6 +584,15 @@ def main():
         st.write("Gegroepeerde staven zetten de platforms naast elkaar. Percentages corrigeren voor catalogusgrootte. "
                  "De lijngrafiek ordent releasejaren chronologisch. Boxplots vergelijken spreiding en medianen zonder "
                  "minuten en seizoenen door elkaar te halen. Filters en conclusies gebruiken dezelfde selectie.")
+        st.subheader("Uitvoeren en API-data vernieuwen")
+        st.write("De repository bevat Dashboard_week_4.py, de twee catalogus-CSV's, requirements.txt en "
+                 "tvmaze_talen.json. Het JSON-bestand is de opgeslagen TVmaze-steekproef voor de taalgrafiek. "
+                 "De app haalt daarnaast zelf live gegevens op bij Titels & API. Er zijn geen API-sleutels nodig.")
+        st.code("python -m pip install -r requirements.txt\n"
+                "python -m streamlit run Dashboard_week_4.py", language="bash")
+        st.caption("De vaste taalsteekproef opnieuw ophalen kan met onderstaande opdracht. "
+                   "Dit duurt enkele minuten; publiceer daarna het vernieuwde JSON-bestand mee.")
+        st.code("python Dashboard_week_4.py --vernieuw-talen", language="bash")
         st.subheader("Documentatie bij de code")
         st.markdown("[Streamlit](https://docs.streamlit.io/develop/api-reference) · "
                     "[pandas merge](https://pandas.pydata.org/docs/reference/api/pandas.DataFrame.merge.html) · "
